@@ -1,17 +1,27 @@
 from flask import Flask, request, jsonify
 from threading import Thread, Lock
-import time
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from collections import deque
+import time
+import os
 
 app = Flask(__name__)
 
+# Shared state
 browser_thread = None
 stop_flag = False
 lock = Lock()
+pending_queue = deque()
+is_running = False
+MAX_QUEUE_SIZE = 5
 
-def launch_browser(url, duration=300):
-    global stop_flag
+def launch_browser_task(url):
+    global is_running, stop_flag
+
+    with lock:
+        is_running = True
+        stop_flag = False
 
     options = Options()
     options.add_argument("--headless")
@@ -19,48 +29,89 @@ def launch_browser(url, duration=300):
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
 
-    driver = webdriver.Chrome(options=options)
-    driver.get(url)
+    try:
+        driver = webdriver.Chrome(options=options)
+        driver.get(url)
+        
+with lock:
+    if stop_flag:
+        driver.quit()
+        return
 
-    start_time = time.time()
-    while time.time() - start_time < duration:
+time.sleep(300)
+
+
+    except Exception as e:
+        print(f"[ERROR] {e}")
+
+    finally:
+        try:
+            driver.quit()
+        except:
+            pass
+
         with lock:
-            if stop_flag:
-                break
-        time.sleep(1)
+            is_running = False
 
-    driver.quit()
+        check_pending_tasks()
+
+def check_pending_tasks():
+    with lock:
+        if pending_queue and not is_running:
+            next_url = pending_queue.popleft()
+            Thread(target=launch_browser_task, args=(next_url,)).start()
 
 @app.route('/start', methods=['GET'])
 def start_browser():
-    global browser_thread, stop_flag
+    global is_running
+
     url = request.args.get('url')
     if not url:
         return jsonify({"error": "Missing URL parameter"}), 400
 
     with lock:
-        if browser_thread and browser_thread.is_alive():
-            return jsonify({"status": "Browser already running"}), 409
-        stop_flag = False
-
-    browser_thread = Thread(target=launch_browser, args=(url,))
-    browser_thread.start()
-    return jsonify({"status": "Browser launched"}), 200
+        if is_running:
+            if len(pending_queue) >= MAX_QUEUE_SIZE:
+                return jsonify({
+                    "status": "Queue full, try again later",
+                    "max_queue_size": MAX_QUEUE_SIZE
+                }), 429
+            pending_queue.append(url)
+            position = len(pending_queue)
+            return jsonify({
+                "status": "Browser busy, URL added to pending queue",
+                "pending_count": position,
+                "your_position": position
+            }), 202
+        else:
+            browser_thread = Thread(target=launch_browser_task, args=(url,))
+            browser_thread.start()
+            return jsonify({"status": "Browser launched"}), 200
 
 @app.route('/stop', methods=['GET'])
 def stop_browser():
-    global stop_flag
+    global stop_flag, pending_queue
+
     with lock:
-        if not browser_thread or not browser_thread.is_alive():
+        if not is_running:
             return jsonify({"status": "No active browser session"}), 404
         stop_flag = True
-    return jsonify({"status": "Stop signal sent"}), 200
+        pending_queue.clear()
+    return jsonify({"status": "Stop signal sent, queue cleared"}), 200
+
+@app.route('/pending', methods=['GET'])
+def show_pending():
+    with lock:
+        return jsonify({
+            "pending_list": list(pending_queue),
+            "pending_count": len(pending_queue)
+        })
 
 @app.route('/')
 def index():
-    return 'Automation server is running.'
+    return '📡 Automation system is running.'
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+    
