@@ -47,7 +47,8 @@ def start():
 
     with lock:
         if stop_flag:
-            return jsonify({"error": "System is stopping"}), 403
+    stop_flag = False  # Automatically resume
+
 
         if is_running:
             if len(pending_numbers) >= MAX_PENDING:
