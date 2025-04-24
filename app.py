@@ -1,117 +1,84 @@
 from flask import Flask, request, jsonify
 from threading import Thread, Lock
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from collections import deque
+from selenium.webdriver.firefox.options import Options
 import time
-import os
 
 app = Flask(__name__)
 
-# Shared state
-browser_thread = None
-stop_flag = False
-lock = Lock()
-pending_queue = deque()
 is_running = False
-MAX_QUEUE_SIZE = 5
+pending_numbers = []
+lock = Lock()
+stop_flag = False
+MAX_PENDING = 10
 
-def launch_browser_task(url):
+def run_browser(url):
     global is_running, stop_flag
 
-    with lock:
-        is_running = True
-        stop_flag = False
-
     options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    options.headless = True
 
+    driver = None
     try:
-        driver = webdriver.Chrome(options=options)
+        driver = webdriver.Firefox(options=options)
         driver.get(url)
-        
-with lock:
-    if stop_flag:
-        driver.quit()
-        return
-
-time.sleep(300)
-
-
+        start_time = time.time()
+        while time.time() - start_time < 300:
+            time.sleep(1)
     except Exception as e:
-        print(f"[ERROR] {e}")
-
+        print(f"Error: {e}")
     finally:
-        try:
+        if driver:
             driver.quit()
-        except:
-            pass
-
         with lock:
             is_running = False
+            if not stop_flag and pending_numbers:
+                next_url = pending_numbers.pop(0)
+                is_running = True
+                Thread(target=run_browser, args=(next_url,)).start()
 
-        check_pending_tasks()
-
-def check_pending_tasks():
-    with lock:
-        if pending_queue and not is_running:
-            next_url = pending_queue.popleft()
-            Thread(target=launch_browser_task, args=(next_url,)).start()
-
-@app.route('/start', methods=['GET'])
-def start_browser():
-    global is_running
-
-    url = request.args.get('url')
+@app.route("/start", methods=["GET"])
+def start():
+    global is_running, stop_flag
+    url = request.args.get("url")
     if not url:
-        return jsonify({"error": "Missing URL parameter"}), 400
+        return jsonify({"error": "Missing ?url="}), 400
 
     with lock:
+        if stop_flag:
+            return jsonify({"error": "System is stopping"}), 403
+
         if is_running:
-            if len(pending_queue) >= MAX_QUEUE_SIZE:
-                return jsonify({
-                    "status": "Queue full, try again later",
-                    "max_queue_size": MAX_QUEUE_SIZE
-                }), 429
-            pending_queue.append(url)
-            position = len(pending_queue)
+            if len(pending_numbers) >= MAX_PENDING:
+                return jsonify({"error": "Queue full"}), 429
+            pending_numbers.append(url)
             return jsonify({
-                "status": "Browser busy, URL added to pending queue",
-                "pending_count": position,
-                "your_position": position
-            }), 202
-        else:
-            browser_thread = Thread(target=launch_browser_task, args=(url,))
-            browser_thread.start()
-            return jsonify({"status": "Browser launched"}), 200
+                "status": "queued",
+                "position": len(pending_numbers)
+            })
 
-@app.route('/stop', methods=['GET'])
-def stop_browser():
-    global stop_flag, pending_queue
+        is_running = True
+        Thread(target=run_browser, args=(url,)).start()
 
+    return jsonify({"status": "started"})
+
+@app.route("/stop", methods=["GET"])
+def stop():
+    global stop_flag, is_running, pending_numbers
     with lock:
-        if not is_running:
-            return jsonify({"status": "No active browser session"}), 404
         stop_flag = True
-        pending_queue.clear()
-    return jsonify({"status": "Stop signal sent, queue cleared"}), 200
+        pending_numbers.clear()
+        is_running = False
+    return jsonify({"status": "stopped and cleared queue"})
 
-@app.route('/pending', methods=['GET'])
-def show_pending():
+@app.route("/status", methods=["GET"])
+def status():
     with lock:
         return jsonify({
-            "pending_list": list(pending_queue),
-            "pending_count": len(pending_queue)
+            "running": is_running,
+            "queue_count": len(pending_numbers),
+            "queue": pending_numbers
         })
 
-@app.route('/')
-def index():
-    return '📡 Automation system is running.'
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-    
+if __name__ == "__main__":
+    app.run()
