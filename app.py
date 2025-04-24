@@ -38,31 +38,28 @@ def run_browser(url):
                 is_running = True
                 Thread(target=run_browser, args=(next_url,)).start()
 
-@app.route("/start", methods=["GET"])
+@app.route("/start")
 def start():
     global is_running, stop_flag
+
     url = request.args.get("url")
     if not url:
         return jsonify({"error": "Missing ?url="}), 400
 
     with lock:
         if stop_flag:
-    stop_flag = False  # Automatically resume
-
+            stop_flag = False  # ✅ Automatically resume if previously stopped
 
         if is_running:
-            if len(pending_numbers) >= MAX_PENDING:
+            if len(pending_queue) >= MAX_QUEUE_SIZE:
                 return jsonify({"error": "Queue full"}), 429
-            pending_numbers.append(url)
-            return jsonify({
-                "status": "queued",
-                "position": len(pending_numbers)
-            })
+            pending_queue.append(url)
+            position = len(pending_queue)
+            return jsonify({"status": "queued", "position": position})
 
         is_running = True
-        Thread(target=run_browser, args=(url,)).start()
-
-    return jsonify({"status": "started"})
+        threading.Thread(target=open_browser_task, args=(url,)).start()
+        return jsonify({"status": "started"})
 
 @app.route("/stop", methods=["GET"])
 def stop():
