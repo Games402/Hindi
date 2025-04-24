@@ -1,42 +1,39 @@
 from flask import Flask, request, jsonify
-from threading import Thread, Lock
-from selenium import webdriver
-from selenium.webdriver.firefox.options import Options
+import threading
 import time
 import os
 
 app = Flask(__name__)
 
+# Shared state
 is_running = False
-pending_numbers = []
-lock = Lock()
 stop_flag = False
-MAX_PENDING = 10
+pending_queue = []
+MAX_QUEUE_SIZE = 10
+lock = threading.Lock()
 
-def run_browser(url):
+# Simulate browser task with 5-minute hold
+def open_browser_task(url):
     global is_running, stop_flag
 
-    options = Options()
-    options.headless = True
-
-    driver = None
     try:
-        driver = webdriver.Firefox(options=options)
-        driver.get(url)
-        start_time = time.time()
-        while time.time() - start_time < 300:
-            time.sleep(1)
-    except Exception as e:
-        print(f"Error: {e}")
+        print(f"[START] Processing: {url}")
+        time.sleep(300)  # Hold for 5 minutes
     finally:
-        if driver:
-            driver.quit()
         with lock:
             is_running = False
-            if not stop_flag and pending_numbers:
-                next_url = pending_numbers.pop(0)
+            print("[END] Task finished")
+
+            if stop_flag:
+                pending_queue.clear()
+                print("[STOP] System stopping, queue cleared")
+                return
+
+            if pending_queue:
+                next_url = pending_queue.pop(0)
                 is_running = True
-                Thread(target=run_browser, args=(next_url,)).start()
+                print(f"[QUEUE] Starting next: {next_url}")
+                threading.Thread(target=open_browser_task, args=(next_url,)).start()
 
 @app.route("/start")
 def start():
@@ -48,40 +45,40 @@ def start():
 
     with lock:
         if stop_flag:
-            stop_flag = False  # ✅ Automatically resume if previously stopped
+            stop_flag = False  # Auto-resume
 
         if is_running:
             if len(pending_queue) >= MAX_QUEUE_SIZE:
                 return jsonify({"error": "Queue full"}), 429
             pending_queue.append(url)
-            position = len(pending_queue)
-            return jsonify({"status": "queued", "position": position})
+            return jsonify({
+                "status": "queued",
+                "position": len(pending_queue)
+            })
 
         is_running = True
         threading.Thread(target=open_browser_task, args=(url,)).start()
         return jsonify({"status": "started"})
 
-@app.route("/stop", methods=["GET"])
+@app.route("/stop")
 def stop():
-    global stop_flag, is_running, pending_numbers
+    global is_running, stop_flag, pending_queue
     with lock:
         stop_flag = True
-        pending_numbers.clear()
         is_running = False
-    return jsonify({"status": "stopped and cleared queue"})
+        pending_queue.clear()
+        return jsonify({"status": "stopped and cleared queue"})
 
-@app.route("/status", methods=["GET"])
+@app.route("/status")
 def status():
     with lock:
         return jsonify({
             "running": is_running,
-            "queue_count": len(pending_numbers),
-            "queue": pending_numbers
+            "queue_count": len(pending_queue),
+            "queue": pending_queue
         })
 
-
-
+# For Render deployment
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-    
